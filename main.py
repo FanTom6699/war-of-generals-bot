@@ -425,19 +425,28 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
 
+    # Если игрок новый, показываем ему цепочку приветствий
     if not player_exists(user_id):
         army_template = {'active': {'soldier': 0}, 'reserve': {'soldier': 0}}
         buildings_template = {'command_center': 1, 'barracks': 1, 'warehouse': 1}
         add_player(user_id, message.from_user.full_name, army_template, buildings_template)
-        await message.answer(
-            LEXICON_RU['welcome'].format(name=message.from_user.full_name),
-            parse_mode=ParseMode.MARKDOWN
-        )
+
+        await message.answer(LEXICON_RU['welcome_1'].format(name=message.from_user.full_name),
+                             parse_mode=ParseMode.MARKDOWN)
+        await asyncio.sleep(3)
+        await message.answer(LEXICON_RU['welcome_2'], parse_mode=ParseMode.MARKDOWN)
+        await asyncio.sleep(4)
+        await message.answer(LEXICON_RU['welcome_3'], parse_mode=ParseMode.MARKDOWN)
+        await asyncio.sleep(4)
+        await message.answer(LEXICON_RU['welcome_4'], parse_mode=ParseMode.MARKDOWN)
+
+    # Если игрок уже есть, показываем стандартное приветствие
     else:
         await check_and_complete_construction(user_id)
         await check_and_complete_training(user_id)
         await message.answer(LEXICON_RU['welcome_back'].format(name=message.from_user.full_name))
 
+    # Общие действия для всех: обновление данных и показ меню
     player_data = get_player(user_id)
     if not player_data:
         logging.error(f"FATAL: Could not get or create player data for user {user_id}")
@@ -644,7 +653,6 @@ async def process_player_id_for_info(message: types.Message, state: FSMContext):
 # ==============================================================================
 @dp.callback_query(F.data == "main_menu")
 async def cq_main_menu(callback: types.CallbackQuery, state: FSMContext):
-    print("!!! HANDLER 'cq_main_menu' СРАБОТАЛ !!!")
     await state.clear()
     await check_and_complete_construction(callback.from_user.id)
     await check_and_complete_training(callback.from_user.id)
@@ -718,7 +726,10 @@ async def show_army_management_menu(upd: Union[types.Message, types.CallbackQuer
     builder.button(text="↩️ Назад на базу", callback_data="show_base")
     builder.adjust(2, 1)
     if isinstance(upd, types.CallbackQuery):
-        await upd.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
+        try:
+            await upd.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
+        except TelegramAPIError:
+            await upd.message.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
         await upd.answer()
     elif isinstance(upd, types.Message):
         await upd.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
@@ -890,10 +901,22 @@ async def show_interactive_training_menu(callback: types.CallbackQuery, state: F
 
 @dp.callback_query(F.data == "show_barracks_training")
 async def cq_start_training_session(callback: types.CallbackQuery, state: FSMContext):
-    if get_training_queue(callback.from_user.id):
-        await callback.answer(LEXICON_RU['error_training_in_progress'], show_alert=True)
+    user_id = callback.from_user.id
+    training_job = get_training_queue(user_id)
+    if training_job:
+        _, unit_id, quantity, next_finish_time = training_job
+        time_left = str(datetime.timedelta(seconds=max(0, int(next_finish_time - time.time()))))
+        text = LEXICON_RU['barracks_busy_status'].format(
+            unit_name=UNITS[unit_id]['name'],
+            quantity=quantity,
+            time_left=time_left
+        )
+        builder = InlineKeyboardBuilder()
+        builder.button(text="↩️ Назад в штаб", callback_data="main_menu")
+        await callback.message.edit_text(text, reply_markup=builder.as_markup())
+        await callback.answer()
         return
-    player_data = get_player(callback.from_user.id)
+    player_data = get_player(user_id)
     if not player_data: return
     await state.set_state(TrainingState.selecting_quantity)
     await state.update_data(quantity_to_train=1)
@@ -906,7 +929,7 @@ async def cq_adjust_training_quantity(callback: types.CallbackQuery, state: FSMC
     player_data = get_player(callback.from_user.id)
     state_data = await state.get_data()
     quantity = state_data.get('quantity_to_train', 1)
-    max_can_train = int(player_data['resources'] / UNITS['soldier']['cost'])
+    max_can_train = int(player_data['resources'] / UNITS['soldier']['cost']) if UNITS['soldier']['cost'] > 0 else 0
     if action == "add":
         quantity += int(callback.data.split("_")[2])
     elif action == "sub":
@@ -914,6 +937,9 @@ async def cq_adjust_training_quantity(callback: types.CallbackQuery, state: FSMC
     elif action == "set":
         quantity = max_can_train if callback.data.split("_")[2] == "max" else 1
     elif action == "confirm":
+        if quantity <= 0:
+            await callback.answer("Не выбрано ни одного юнита для тренировки.", show_alert=True)
+            return
         total_cost = UNITS['soldier']['cost'] * quantity
         if player_data['resources'] < total_cost:
             await callback.answer(LEXICON_RU['error_not_enough_resources_alert'], show_alert=True)
@@ -1134,7 +1160,6 @@ async def cq_view_report(callback: types.CallbackQuery):
 # ==============================================================================
 async def main():
     init_db()
-    # Устанавливаем команды меню при старте
     await set_main_menu(bot)
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
