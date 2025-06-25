@@ -25,15 +25,12 @@ from lexicon import LEXICON_RU, LEXICON_COMMANDS_RU
 
 logging.basicConfig(level=logging.INFO)
 # --- ПЕРЕМЕННЫЕ ДЛЯ ХОСТИНГА ---
-# Код будет брать токен из настроек Render (Environment Variables)
 API_TOKEN = os.environ.get('TELEGRAM_API_TOKEN')
-# Код будет использовать базу данных на специальном диске Render
 DATABASE_NAME = '/var/data/wog_database.db'
 # ---------------------------------
 
 ADMIN_IDS = [5658493362]
 
-# Проверка, что токен был найден. Если нет, бот не запустится.
 if not API_TOKEN:
     raise ValueError("Не найден API_TOKEN. Убедитесь, что он задан в переменных окружения.")
 
