@@ -133,7 +133,6 @@ def get_bonus_cooldown(user_id: int) -> int | None:
 def set_bonus_claimed(user_id: int):
     with sqlite3.connect(DATABASE_NAME) as conn:
         cursor = conn.cursor()
-        # ИСПРАВЛЕНИЕ: ставим notification_sent в 0, чтобы планировщик знал, что нужно будет отправить уведомление
         cursor.execute("REPLACE INTO daily_bonuses (user_id, last_claim_timestamp, notification_sent) VALUES (?, ?, 0)", (user_id, int(time.time())))
         conn.commit()
 
@@ -334,6 +333,13 @@ class ArmyManagementState(StatesGroup):
 # ==============================================================================
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И УТИЛИТЫ ---
 # ==============================================================================
+def create_progress_bar(current: float, maximum: float, length: int = 10) -> str:
+    if maximum == 0: return '░' * length
+    percent = current / maximum
+    filled_length = int(length * percent)
+    bar = '█' * filled_length + '░' * (length - filled_length)
+    return bar
+
 def update_player_resources(player_data: dict):
     now = int(time.time())
     time_passed_seconds = now - player_data.get('last_update', now)
@@ -377,7 +383,7 @@ async def check_and_complete_training(user_id: int):
             conn.commit()
     if units_completed > 0 and quantity_remaining == 0:
         try:
-            await bot.send_message(user_id, "✅ **Подготовка завершена!** Новые отряды прибыли в резерв.")
+            await bot.send_message(user_id, "✅ **Подготовка завершена!** Новые отряды прибыли в гарнизон.")
         except TelegramAPIError as e:
             logging.error(f"Не удалось уведомить о финальном завершении тренировки {user_id}: {e}")
     return units_completed > 0
@@ -439,19 +445,21 @@ async def check_bonus_notifications():
 # ==============================================================================
 def get_main_menu_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="🏕️ Моя база", callback_data="show_base")
-    builder.button(text="🛖 Казарма", callback_data="show_barracks_training")
-    builder.button(text="🏭 Здания", callback_data="show_buildings")
-    builder.button(text="🏆 Рейтинг", callback_data="show_rating")
-    builder.button(text="🎯 Список целей", callback_data="show_targets")
-    builder.adjust(2, 2, 1)
+    builder.button(text="🏕️ Оперативная сводка", callback_data="show_base")
+    builder.button(text="🎯 Цели для атаки", callback_data="show_targets")
+    builder.button(text="🏭 Объекты и стройка", callback_data="show_buildings")
+    builder.button(text="🛖 Подготовка войск", callback_data="show_barracks_training")
+    builder.button(text="🏆 Зал славы", callback_data="show_rating")
+    builder.button(text="🎁 Бонусный контейнер", callback_data="show_bonus_menu")
+    builder.adjust(2, 2, 2)
     return builder.as_markup()
 
 
-def get_buildings_menu_keyboard():
+def get_buildings_menu_keyboard(player_buildings: dict):
     builder = InlineKeyboardBuilder()
     for bld_id, bld_info in BUILDINGS.items():
-        builder.button(text=bld_info['name'], callback_data=f"view_building_{bld_id}")
+        level = player_buildings.get(bld_id, 0)
+        builder.button(text=f"{bld_info['name']} (Ур. {level})", callback_data=f"view_building_{bld_id}")
     builder.button(text="↩️ Назад в штаб", callback_data="main_menu")
     builder.adjust(1)
     return builder.as_markup()
@@ -568,7 +576,7 @@ async def process_bonus_claim(source: Union[types.Message, types.CallbackQuery])
             await msg_for_anim.edit_text(LEXICON_RU['bonus_opening'].format(spinner=spinners[i % len(spinners)]))
         
         player_data = get_player(user.id)
-        if not player_data: # Проверка на случай, если игрок удалил данные
+        if not player_data:
             return
             
         prize_text = ""
@@ -597,6 +605,7 @@ async def text_cmd_bonus(message: types.Message):
 
 @dp.callback_query(F.data == "show_bonus_menu")
 async def cq_show_bonus_menu(callback: types.CallbackQuery):
+    await callback.message.delete()
     await process_bonus_claim(callback)
 
 
@@ -799,32 +808,45 @@ async def cq_show_base(callback: types.CallbackQuery, state: FSMContext):
         return
     player_data = update_player_resources(player_data)
     update_player_data(user_id, player_data)
-    active_army = player_data['army'].get('active', {}).get('soldier', 0)
-    reserve_army = player_data['army'].get('reserve', {}).get('soldier', 0)
+    
+    warehouse_level = player_data['buildings'].get('warehouse', 1)
+    capacity = WAREHOUSE_CAPACITY.get(warehouse_level, 1)
+    
     text = LEXICON_RU['base_info_title'] + '\n\n' + LEXICON_RU['base_info_text'].format(
-        resources=int(player_data['resources']),
-        active_army=active_army,
-        reserve_army=reserve_army
+        capacity_bar=create_progress_bar(player_data['resources'], capacity),
+        percent_full=int((player_data['resources'] / capacity) * 100) if capacity > 0 else 0,
+        current_res=int(player_data['resources']),
+        capacity_val=capacity,
+        active_army=player_data['army'].get('active', {}).get('soldier', 0),
+        reserve_army=player_data['army'].get('reserve', {}).get('soldier', 0)
     )
+    
+    processes_text = ""
     construction_job = get_construction_queue(user_id)
     if construction_job:
         _, _, bld_id, finish_time = construction_job
         time_left = str(datetime.timedelta(seconds=max(0, int(finish_time - time.time()))))
-        text += LEXICON_RU['construction_in_progress'].format(
-            building_name=BUILDINGS.get(bld_id, {}).get('name', 'Здание'),
+        processes_text += '\n' + LEXICON_RU['construction_in_progress'].format(
+            building_name=BUILDINGS[bld_id]['name'],
+            level=player_data['buildings'].get(bld_id, 0) + 1,
             time_left=time_left
         )
+        
     training_job = get_training_queue(user_id)
     if training_job:
         _, unit_id, quantity, next_finish_time = training_job
         time_left = str(datetime.timedelta(seconds=max(0, int(next_finish_time - time.time()))))
-        text += LEXICON_RU['training_in_progress'].format(
+        processes_text += ('\n' if processes_text else '') + LEXICON_RU['training_in_progress'].format(
             unit_name=UNITS[unit_id]['name'],
             quantity=quantity,
             time_left=time_left
         )
+    
+    if processes_text:
+        text += LEXICON_RU['base_processes_title'] + processes_text
+
     builder = InlineKeyboardBuilder()
-    builder.button(text="🗂️ Управление л/с", callback_data="manage_army")
+    builder.button(text="🗂️ Распределение сил", callback_data="manage_army")
     builder.button(text="↩️ Назад в штаб", callback_data="main_menu")
     builder.adjust(1)
     await callback.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
@@ -832,29 +854,31 @@ async def cq_show_base(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "manage_army")
 async def cq_manage_army(callback: types.CallbackQuery, state: FSMContext):
-    await show_army_management_menu(callback, state)
+    await show_army_management_menu(callback.from_user.id, state, message_to_edit=callback.message)
     
-async def show_army_management_menu(upd: Union[types.Message, types.CallbackQuery], state: FSMContext):
+async def show_army_management_menu(user_id: int, state: FSMContext, message_to_edit: types.Message = None, message_to_answer: types.Message = None):
     await state.clear()
-    user_id = upd.from_user.id
     player_data = get_player(user_id)
     if not player_data: return
-    active_army = player_data['army']['active'].get('soldier', 0)
-    reserve_army = player_data['army']['reserve'].get('soldier', 0)
-    text = LEXICON_RU['army_management_title'].format(active_army=active_army, reserve_army=reserve_army)
+    
+    text = LEXICON_RU['army_management_title'].format(
+        active_army=player_data['army']['active'].get('soldier', 0),
+        reserve_army=player_data['army']['reserve'].get('soldier', 0)
+    )
     builder = InlineKeyboardBuilder()
-    builder.button(text="➡️ В резерв", callback_data="move_to_reserve")
-    builder.button(text="⬅️ В строй", callback_data="move_to_active")
-    builder.button(text="↩️ Назад на базу", callback_data="show_base")
+    builder.button(text="➡️ В гарнизон", callback_data="move_to_reserve")
+    builder.button(text="⬅️ В штурмовой отряд", callback_data="move_to_active")
+    builder.button(text="↩️ Назад", callback_data="show_base")
     builder.adjust(2, 1)
-    if isinstance(upd, types.CallbackQuery):
+
+    if message_to_edit:
         try:
-            await upd.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
-        except TelegramAPIError:
-             await upd.message.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
-        await upd.answer()
-    elif isinstance(upd, types.Message):
-        await upd.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
+            await message_to_edit.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
+        except TelegramAPIError: # Если сообщение не изменилось
+             if message_to_answer:
+                await message_to_answer.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
+    elif message_to_answer:
+         await message_to_answer.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
         
 @dp.callback_query(F.data == "move_to_reserve")
 async def cq_move_to_reserve(callback: types.CallbackQuery, state: FSMContext):
@@ -884,7 +908,7 @@ async def process_move_to_reserve(message: types.Message, state: FSMContext):
     player_data['army']['reserve']['soldier'] += quantity
     update_player_data(message.from_user.id, player_data)
     await message.reply(LEXICON_RU['move_to_reserve_success'].format(quantity=quantity))
-    await show_army_management_menu(message, state)
+    await show_army_management_menu(message.from_user.id, state, message_to_answer=message)
 
 @dp.message(ArmyManagementState.waiting_for_active_quantity)
 async def process_move_to_active(message: types.Message, state: FSMContext):
@@ -902,12 +926,15 @@ async def process_move_to_active(message: types.Message, state: FSMContext):
     player_data['army']['active']['soldier'] += quantity
     update_player_data(message.from_user.id, player_data)
     await message.reply(LEXICON_RU['move_to_active_success'].format(quantity=quantity))
-    await show_army_management_menu(message, state)
+    await show_army_management_menu(message.from_user.id, state, message_to_answer=message)
 
 @dp.callback_query(F.data == "show_buildings")
 async def cq_show_buildings_menu(callback: types.CallbackQuery):
     await check_and_complete_construction(callback.from_user.id)
-    await callback.message.edit_text(LEXICON_RU['buildings_menu_title'], reply_markup=get_buildings_menu_keyboard())
+    player_data = get_player(callback.from_user.id)
+    if not player_data: return
+    
+    await callback.message.edit_text(LEXICON_RU['buildings_menu_title'], reply_markup=get_buildings_menu_keyboard(player_data['buildings']))
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("view_building_"))
@@ -1076,7 +1103,7 @@ async def cq_adjust_training_quantity(callback: types.CallbackQuery, state: FSMC
         await state.clear()
         await callback.message.edit_text(
             LEXICON_RU['training_started'],
-            reply_markup=InlineKeyboardBuilder().button(text="🏕️ На базу", callback_data="show_base").as_markup())
+            reply_markup=InlineKeyboardBuilder().button(text="🏕️ Перейти на базу", callback_data="show_base").as_markup())
         return
     await state.update_data(quantity_to_train=quantity)
     await show_interactive_training_menu(callback, state, player_data)
@@ -1116,7 +1143,7 @@ async def cq_show_specific_rating(callback: types.CallbackQuery):
         else:
             for i, (name, value) in enumerate(top_players):
                 rating_text += LEXICON_RU['rating_line'].format(medal=medals[i], rank=i + 1, name=name, metric=metrics[category], value=int(value))
-    builder = InlineKeyboardBuilder().button(text="↩️ Назад к рейтингам", callback_data="show_rating")
+    builder = InlineKeyboardBuilder().button(text="↩️ Назад к Залу славы", callback_data="show_rating")
     await callback.message.edit_text(rating_text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
     await callback.answer()
 
@@ -1130,11 +1157,13 @@ async def cq_show_targets(callback: types.CallbackQuery):
         return
     targets = get_all_players_for_attack(callback.from_user.id)
     if not targets:
-        await callback.message.edit_text(LEXICON_RU['no_targets_available'], reply_markup=InlineKeyboardBuilder().button(text="↩️ Назад", callback_data="main_menu").as_markup())
+        await callback.message.edit_text(LEXICON_RU['no_targets_available'], reply_markup=InlineKeyboardBuilder().button(text="↩️ Назад в штаб", callback_data="main_menu").as_markup())
         return
+        
     builder = InlineKeyboardBuilder()
     for t_id, name in targets:
-        builder.button(text=f"Атаковать {name}", callback_data=f"attack_{t_id}")
+        builder.button(text=f"🎯 {name}", callback_data=f"attack_{t_id}")
+    builder.button(text="📡 Обновить данные", callback_data="show_targets")
     builder.button(text="↩️ Назад в штаб", callback_data="main_menu")
     builder.adjust(1)
     await callback.message.edit_text(LEXICON_RU['select_target'], reply_markup=builder.as_markup())
@@ -1177,6 +1206,7 @@ async def cq_attack_player(callback: types.CallbackQuery, state: FSMContext):
             except TelegramAPIError as e:
                 logging.error(f"Не удалось отправить уведомление защитнику {defender_id}: {e}")
             return
+            
         luck_modifier = random.uniform(-LUCK_MODIFIER_RANGE, LUCK_MODIFIER_RANGE)
         a_total_damage = a_initial_army * s_stats['attack'] * (1 + luck_modifier)
         defender_losses = min(d_initial_army, round(a_total_damage / s_stats['hp']))
@@ -1197,13 +1227,25 @@ async def cq_attack_player(callback: types.CallbackQuery, state: FSMContext):
             looted_resources = min(available_for_looting, cargo_capacity)
             attacker_data['resources'] += looted_resources
             defender_data['resources'] -= looted_resources
+            
         attacker_data['army']['active']['soldier'] = a_survivors
         defender_data['army']['active']['soldier'] = d_survivors
         update_player_data(attacker_id, attacker_data)
         update_player_data(defender_id, defender_data)
+        
         now_str = datetime.datetime.now().strftime('%d.%m.%Y %H:%M')
-        attacker_report = LEXICON_RU['battle_report_title'] + '\n\n' + LEXICON_RU['battle_report_header'].format(battle_type="Атака на", target_name=defender_data['name'], datetime=now_str, operation_type="Нападение", luck_modifier=luck_modifier, result="Победа" if is_attacker_win else "Поражение") + LEXICON_RU['battle_report_loot'].format(looted_resources=int(looted_resources)) + LEXICON_RU['battle_report_attacker_stats'].format(attacker_name=attacker_data['name'], losses=attacker_losses, initial=a_initial_army, loss_percent=round(attacker_losses / a_initial_army * 100 if a_initial_army > 0 else 0)) + LEXICON_RU['battle_report_defender_stats'].format(defender_name=defender_data['name'], losses=defender_losses, initial=d_initial_army, loss_percent=round(defender_losses / d_initial_army * 100 if d_initial_army > 0 else 0))
-        defender_report = LEXICON_RU['battle_report_title'] + '\n\n' + LEXICON_RU['battle_report_header'].format(battle_type="Оборона от", target_name=attacker_data['name'], datetime=now_str, operation_type="Оборона", luck_modifier=luck_modifier, result="Успешно" if not is_attacker_win else "Неуспешно") + LEXICON_RU['battle_report_loot'].format(looted_resources=int(looted_resources)) + LEXICON_RU['battle_report_defender_stats'].format(defender_name=defender_data['name'], losses=defender_losses, initial=d_initial_army, loss_percent=round(defender_losses / d_initial_army * 100 if d_initial_army > 0 else 0)) + LEXICON_RU['battle_report_attacker_stats'].format(attacker_name=attacker_data['name'], losses=attacker_losses, initial=a_initial_army, loss_percent=round(attacker_losses / a_initial_army * 100 if a_initial_army > 0 else 0))
+        
+        attacker_report = (LEXICON_RU['battle_report_title'] + '\n' + 
+            LEXICON_RU['battle_report_header'].format(operation_type="Нападение", target_name=defender_data['name'], datetime=now_str, luck_modifier=luck_modifier, result="ПОБЕДА") +
+            LEXICON_RU['battle_report_loot'].format(looted_resources=int(looted_resources)) +
+            LEXICON_RU['battle_report_attacker_stats'].format(attacker_name=attacker_data['name'], losses=attacker_losses, initial=a_initial_army, loss_percent=round(attacker_losses / a_initial_army * 100 if a_initial_army > 0 else 0)) +
+            LEXICON_RU['battle_report_defender_stats'].format(defender_name=defender_data['name'], losses=defender_losses, initial=d_initial_army, loss_percent=round(defender_losses / d_initial_army * 100 if d_initial_army > 0 else 0)))
+        
+        defender_report = (LEXICON_RU['battle_report_title'] + '\n' + 
+            LEXICON_RU['battle_report_header'].format(operation_type="Оборона", target_name=attacker_data['name'], datetime=now_str, luck_modifier=luck_modifier, result="ПОРАЖЕНИЕ") +
+            LEXICON_RU['battle_report_defender_stats'].format(defender_name=defender_data['name'], losses=defender_losses, initial=d_initial_army, loss_percent=round(defender_losses / d_initial_army * 100 if d_initial_army > 0 else 0)) +
+            LEXICON_RU['battle_report_attacker_stats'].format(attacker_name=attacker_data['name'], losses=attacker_losses, initial=a_initial_army, loss_percent=round(attacker_losses / a_initial_army * 100 if a_initial_army > 0 else 0)))
+
         await callback.message.edit_text(attacker_report, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardBuilder().button(text="↩️ В штаб", callback_data="main_menu").as_markup())
         report_id = add_battle_report(defender_id, defender_report)
         set_attack_cooldown(attacker_id, int(time.time() + ATTACK_COOLDOWN_SECONDS))
@@ -1211,6 +1253,7 @@ async def cq_attack_player(callback: types.CallbackQuery, state: FSMContext):
             await bot.send_message(defender_id, LEXICON_RU['attack_notification'], reply_markup=InlineKeyboardBuilder().button(text="👁️ Посмотреть отчет", callback_data=f"view_report_{report_id}").as_markup())
         except TelegramAPIError as e:
             logging.error(f"Не удалось отправить уведомление защитнику {defender_id}: {e}")
+            
     except Exception as e:
         logging.error(f"КРИТИЧЕСКАЯ ОШИБКА В БОЮ: {e}", exc_info=True)
         await callback.message.edit_text(LEXICON_RU['critical_battle_error'], reply_markup=InlineKeyboardBuilder().button(text="↩️ В штаб", callback_data="main_menu").as_markup())
@@ -1231,7 +1274,6 @@ async def main():
     init_db()
     await set_main_menu(bot)
     
-    # Запускаем планировщик для уведомлений о бонусах
     scheduler.add_job(check_bonus_notifications, 'interval', minutes=15)
     scheduler.start()
 
