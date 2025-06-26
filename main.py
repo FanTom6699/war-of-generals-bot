@@ -54,7 +54,7 @@ BUILDINGS = {
 }
 LUCK_MODIFIER_RANGE = 0.25
 ATTACK_COOLDOWN_SECONDS = 600
-BONUS_COOLDOWN_SECONDS = 2 * 3600  # 2 часа
+BONUS_COOLDOWN_SECONDS = 2 * 3600
 
 BARRACKS_TRAINING_TIME = {1: 90, 2: 82, 3: 75, 4: 68, 5: 62, 6: 56, 7: 50, 8: 45, 9: 40, 10: 35}
 WAREHOUSE_PROTECTION_PERCENT = 0.40
@@ -70,6 +70,21 @@ WAREHOUSE_CAPACITY = {
     1: 2000, 2: 4000, 3: 7000, 4: 12000, 5: 20000,
     6: 30000, 7: 50000, 8: 80000, 9: 120000, 10: 200000
 }
+
+# --- ШАБЛОНЫ ДЛЯ NPC ---
+NPC_LEVELS = {
+    1: {'name': 'Сторожевой пост', 'army_range': (10, 20), 'resources_range': (400, 600)},
+    2: {'name': 'Блокпост', 'army_range': (30, 45), 'resources_range': (1000, 1500)},
+    3: {'name': 'Малая база', 'army_range': (60, 85), 'resources_range': (2200, 3000)},
+    4: {'name': 'Гарнизон повстанцев', 'army_range': (100, 140), 'resources_range': (4500, 6000)},
+    5: {'name': 'Укрепленный лагерь', 'army_range': (160, 200), 'resources_range': (8000, 11000)},
+    6: {'name': 'Военная база', 'army_range': (220, 280), 'resources_range': (13000, 18000)},
+    7: {'name': 'Опорный пункт', 'army_range': (320, 400), 'resources_range': (22000, 30000)},
+    8: {'name': 'Цитадель', 'army_range': (450, 550), 'resources_range': (35000, 50000)},
+    9: {'name': 'Крепость "Гидра"', 'army_range': (650, 750), 'resources_range': (60000, 80000)},
+    10: {'name': 'Комплекс "Омега"', 'army_range': (900, 1100), 'resources_range': (90000, 120000)},
+}
+MAX_ACTIVE_NPC_CAMPS = 7
 
 
 # ==============================================================================
@@ -108,6 +123,16 @@ def init_db():
                 user_id INTEGER PRIMARY KEY,
                 last_claim_timestamp INTEGER NOT NULL,
                 notification_sent INTEGER DEFAULT 0
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS npc_bases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                npc_level INTEGER NOT NULL,
+                army TEXT NOT NULL,
+                resources REAL NOT NULL,
+                is_active INTEGER DEFAULT 1
             )
         ''')
         try:
@@ -288,13 +313,6 @@ def get_battle_report(report_id: int) -> Union[str, None]:
         return row[0] if row else None
 
 
-def get_all_players_for_attack(user_id_to_exclude: int) -> list:
-    with sqlite3.connect(DATABASE_NAME) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id, name FROM players WHERE user_id != ?", (user_id_to_exclude,))
-        return cursor.fetchall()
-
-
 def set_attack_cooldown(user_id: int, finish_time: int):
     with sqlite3.connect(DATABASE_NAME) as conn:
         cursor = conn.cursor()
@@ -310,6 +328,70 @@ def get_attack_cooldown(user_id: int) -> Union[int, None]:
         if row and row[0] > int(time.time()):
             return row[0]
         return None
+
+def get_active_npc_count() -> int:
+    with sqlite3.connect(DATABASE_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(id) FROM npc_bases WHERE is_active = 1")
+        return cursor.fetchone()[0]
+
+def spawn_npc_base():
+    with sqlite3.connect(DATABASE_NAME) as conn:
+        cursor = conn.cursor()
+        level = random.choices(list(NPC_LEVELS.keys()), weights=[30,25,20,10,5,4,3,2,1,0.5], k=1)[0]
+        template = NPC_LEVELS[level]
+        army_size = random.randint(*template['army_range'])
+        resources = random.randint(*template['resources_range'])
+        name = f"{template['name']}"
+        army_json = json.dumps({'soldier': army_size})
+        cursor.execute("INSERT INTO npc_bases (name, npc_level, army, resources) VALUES (?, ?, ?, ?)",
+                       (name, level, army_json, resources))
+        conn.commit()
+        logging.info(f"Spawned NPC Base: {name} with {army_size} soldiers.")
+
+def get_all_targets(user_id_to_exclude: int) -> list:
+    with sqlite3.connect(DATABASE_NAME) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, name, army, buildings FROM players WHERE user_id != ?", (user_id_to_exclude,))
+        players = [dict(row) for row in cursor.fetchall()]
+        cursor.execute("SELECT id, name, npc_level, army FROM npc_bases WHERE is_active = 1")
+        npcs = [dict(row) for row in cursor.fetchall()]
+        targets = []
+        for p in players:
+            army_dict = json.loads(p['army'])
+            total_army = army_dict.get('active', {}).get('soldier', 0) + army_dict.get('reserve', {}).get('soldier', 0)
+            power = total_army * (UNITS['soldier']['stats']['hp'] + UNITS['soldier']['stats']['attack'])
+            targets.append({
+                'id': p['user_id'], 'name': p['name'], 'type': 'player',
+                'power': power, 'cc_level': json.loads(p['buildings']).get('command_center', 1)
+            })
+        for npc in npcs:
+            army_dict = json.loads(npc['army'])
+            power = army_dict.get('soldier', 0) * (UNITS['soldier']['stats']['hp'] + UNITS['soldier']['stats']['attack'])
+            targets.append({
+                'id': npc['id'], 'name': f"{npc['name']} (Ур. {npc['npc_level']})", 'type': 'npc',
+                'power': power
+            })
+        return sorted(targets, key=lambda t: t['power'])
+
+def get_npc_by_id(npc_id: int) -> dict | None:
+    with sqlite3.connect(DATABASE_NAME) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM npc_bases WHERE id = ? AND is_active = 1", (npc_id,))
+        row = cursor.fetchone()
+        if row:
+            npc_dict = dict(row)
+            npc_dict['army'] = json.loads(npc_dict['army'])
+            return npc_dict
+        return None
+
+def deactivate_npc(npc_id: int):
+    with sqlite3.connect(DATABASE_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE npc_bases SET is_active = 0 WHERE id = ?", (npc_id,))
+        conn.commit()
 # ==============================================================================
 # --- FSM (МАШИНА СОСТОЯНИЙ) ---
 # ==============================================================================
@@ -439,6 +521,12 @@ async def check_bonus_notifications():
                 else:
                     logging.error(f"Failed to send bonus notification to {user_id}: {e}")
             await asyncio.sleep(0.1)
+            
+async def manage_npc_spawns():
+    logging.info("Scheduler job 'manage_npc_spawns' running...")
+    active_npcs = get_active_npc_count()
+    if active_npcs < MAX_ACTIVE_NPC_CAMPS:
+        spawn_npc_base()
 
 # ==============================================================================
 # --- КЛАВИАТУРЫ ---
@@ -446,7 +534,7 @@ async def check_bonus_notifications():
 def get_main_menu_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="🏕️ Оперативная сводка", callback_data="show_base")
-    builder.button(text="🎯 Цели для атаки", callback_data="show_targets")
+    builder.button(text="🎯 Цели для атаки", callback_data="show_targets_page_1")
     builder.button(text="🏭 Объекты и стройка", callback_data="show_buildings")
     builder.button(text="🛖 Подготовка войск", callback_data="show_barracks_training")
     builder.button(text="🏆 Зал славы", callback_data="show_rating")
@@ -484,7 +572,6 @@ def get_admin_resources_keyboard():
 # ==============================================================================
 # --- ОБРАБОТЧИКИ КОМАНД И ОСНОВНЫЕ МЕНЮ ---
 # ==============================================================================
-
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -1147,66 +1234,97 @@ async def cq_show_specific_rating(callback: types.CallbackQuery):
     await callback.message.edit_text(rating_text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
     await callback.answer()
 
-@dp.callback_query(F.data == "show_targets")
+@dp.callback_query(F.data.startswith("show_targets_page_"))
 async def cq_show_targets(callback: types.CallbackQuery):
+    page = int(callback.data.split("_")[-1])
+    page_size = 5
     cooldown_finish_time = get_attack_cooldown(callback.from_user.id)
     if cooldown_finish_time:
         remaining_seconds = max(0, int(cooldown_finish_time - time.time()))
         minutes, seconds = divmod(remaining_seconds, 60)
         await callback.answer(LEXICON_RU['attack_cooldown'].format(time_left=f"{minutes:02d}:{seconds:02d}"), show_alert=True)
         return
-    targets = get_all_players_for_attack(callback.from_user.id)
-    if not targets:
+        
+    all_targets = get_all_targets(callback.from_user.id)
+    if not all_targets:
         await callback.message.edit_text(LEXICON_RU['no_targets_available'], reply_markup=InlineKeyboardBuilder().button(text="↩️ Назад в штаб", callback_data="main_menu").as_markup())
         return
-        
+    
+    total_pages = (len(all_targets) + page_size - 1) // page_size
+    start_index = (page - 1) * page_size
+    end_index = start_index + page_size
+    targets_on_page = all_targets[start_index:end_index]
+    
     builder = InlineKeyboardBuilder()
-    for t_id, name in targets:
-        builder.button(text=f"🎯 {name}", callback_data=f"attack_{t_id}")
-    builder.button(text="📡 Обновить данные", callback_data="show_targets")
-    builder.button(text="↩️ Назад в штаб", callback_data="main_menu")
-    builder.adjust(1)
-    await callback.message.edit_text(LEXICON_RU['select_target'], reply_markup=builder.as_markup())
+    text = LEXICON_RU['select_target'].format(current_page=page, total_pages=total_pages) + "\n\n"
+
+    for target in targets_on_page:
+        if target['type'] == 'player':
+            button_text = LEXICON_RU['target_player_entry'].format(name=target['name'], power=target['power'], cc_level=target['cc_level'])
+            callback_data = f"attack_player_{target['id']}"
+        else: # npc
+            button_text = LEXICON_RU['target_npc_entry'].format(name=target['name'], power=target['power'])
+            callback_data = f"attack_npc_{target['id']}"
+        builder.button(text=button_text, callback_data=callback_data)
+        builder.row()
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(types.InlineKeyboardButton(text="◀️ Пред.", callback_data=f"show_targets_page_{page - 1}"))
+    if page < total_pages:
+        nav_row.append(types.InlineKeyboardButton(text="След. ▶️", callback_data=f"show_targets_page_{page + 1}"))
+    if nav_row:
+        builder.row(*nav_row)
+
+    builder.row(types.InlineKeyboardButton(text="↩️ Назад в штаб", callback_data="main_menu"))
+    
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("attack_"))
-async def cq_attack_player(callback: types.CallbackQuery, state: FSMContext):
+async def cq_attack(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer("Симуляция боя...")
     try:
         await state.clear()
-        attacker_id, defender_id = callback.from_user.id, int(callback.data.split("_")[1])
-        if get_attack_cooldown(attacker_id):
-            await callback.answer(LEXICON_RU['error_attack_on_cooldown_alert'], show_alert=True)
+        _, target_type, target_id_str = callback.data.split("_", 2)
+        target_id = int(target_id_str)
+        
+        attacker_id = callback.from_user.id
+        attacker_data = get_player(attacker_id)
+
+        if not attacker_data:
             return
-        attacker_data, defender_data = get_player(attacker_id), get_player(defender_id)
-        if not attacker_data or not defender_data: return
+
         a_initial_army = attacker_data['army']['active'].get('soldier', 0)
         if a_initial_army == 0:
             await callback.answer(LEXICON_RU['error_no_army_to_attack_alert'], show_alert=True)
             return
-        d_initial_army = defender_data['army']['active'].get('soldier', 0)
+
+        defender_data = None
+        if target_type == 'player':
+            defender_data = get_player(target_id)
+            if defender_data:
+                defender_data['type'] = 'player'
+        elif target_type == 'npc':
+            npc_data = get_npc_by_id(target_id)
+            if npc_data:
+                defender_data = {
+                    'id': npc_data['id'],
+                    'name': npc_data['name'],
+                    'army': npc_data['army'],
+                    'resources': npc_data['resources'],
+                    'buildings': {},
+                    'type': 'npc'
+                }
+        
+        if not defender_data:
+             await callback.message.edit_text("Цель не найдена или уже уничтожена.", reply_markup=InlineKeyboardBuilder().button(text="↩️ Назад", callback_data="show_targets_page_1").as_markup())
+             return
+
+        # Общая логика боя
+        d_initial_army = defender_data['army'].get('soldier', 0)
         s_stats = UNITS['soldier']['stats']
-        if d_initial_army == 0:
-            attacker_data['attack_wins'] += 1
-            warehouse_level = defender_data['buildings'].get('warehouse', 1)
-            capacity = WAREHOUSE_CAPACITY.get(warehouse_level, 0)
-            protected_resources = capacity * WAREHOUSE_PROTECTION_PERCENT
-            available_for_looting = max(0, defender_data['resources'] - protected_resources)
-            cargo_capacity = a_initial_army * s_stats['cargo_capacity']
-            looted_resources = min(available_for_looting, cargo_capacity)
-            attacker_data['resources'] += looted_resources
-            defender_data['resources'] -= looted_resources
-            update_player_data(defender_id, defender_data)
-            update_player_data(attacker_id, attacker_data)
-            report_text = LEXICON_RU['defenseless_attack_report'].format(target_name=defender_data['name'], looted_resources=int(looted_resources))
-            await callback.message.edit_text(report_text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardBuilder().button(text="↩️ В штаб", callback_data="main_menu").as_markup())
-            report_id = add_battle_report(defender_id, report_text)
-            set_attack_cooldown(attacker_id, int(time.time() + ATTACK_COOLDOWN_SECONDS))
-            try:
-                await bot.send_message(defender_id, LEXICON_RU['attack_notification'], reply_markup=InlineKeyboardBuilder().button(text="👁️ Посмотреть отчет", callback_data=f"view_report_{report_id}").as_markup())
-            except TelegramAPIError as e:
-                logging.error(f"Не удалось отправить уведомление защитнику {defender_id}: {e}")
-            return
-            
+        
         luck_modifier = random.uniform(-LUCK_MODIFIER_RANGE, LUCK_MODIFIER_RANGE)
         a_total_damage = a_initial_army * s_stats['attack'] * (1 + luck_modifier)
         defender_losses = min(d_initial_army, round(a_total_damage / s_stats['hp']))
@@ -1214,47 +1332,57 @@ async def cq_attack_player(callback: types.CallbackQuery, state: FSMContext):
         d_total_damage = d_survivors * s_stats['attack']
         attacker_losses = min(a_initial_army, round(d_total_damage / s_stats['hp']))
         a_survivors = a_initial_army - attacker_losses
-        is_attacker_win = attacker_losses < defender_losses
-        if is_attacker_win: attacker_data['attack_wins'] += 1
-        else: defender_data['defense_wins'] += 1
+        is_attacker_win = a_survivors > d_survivors if defender_data['type'] == 'npc' else attacker_losses < defender_losses
+
         looted_resources = 0
         if is_attacker_win:
-            warehouse_level = defender_data['buildings'].get('warehouse', 1)
+            attacker_data['attack_wins'] += 1
+            if defender_data['type'] == 'npc':
+                deactivate_npc(target_id)
+            
+            warehouse_level = defender_data.get('buildings', {}).get('warehouse', 1)
             capacity = WAREHOUSE_CAPACITY.get(warehouse_level, 0)
             protected_resources = capacity * WAREHOUSE_PROTECTION_PERCENT
             available_for_looting = max(0, defender_data['resources'] - protected_resources)
             cargo_capacity = a_survivors * s_stats['cargo_capacity']
             looted_resources = min(available_for_looting, cargo_capacity)
-            attacker_data['resources'] += looted_resources
-            defender_data['resources'] -= looted_resources
             
+            attacker_data['resources'] += looted_resources
+            if defender_data['type'] == 'player':
+                defender_data['resources'] -= looted_resources
+        
         attacker_data['army']['active']['soldier'] = a_survivors
-        defender_data['army']['active']['soldier'] = d_survivors
         update_player_data(attacker_id, attacker_data)
-        update_player_data(defender_id, defender_data)
+
+        if defender_data['type'] == 'player':
+            defender_data['army']['active']['soldier'] = d_survivors
+            defender_data['defense_wins'] = defender_data.get('defense_wins', 0) + (0 if is_attacker_win else 1)
+            update_player_data(target_id, defender_data)
         
         now_str = datetime.datetime.now().strftime('%d.%m.%Y %H:%M')
         
-        attacker_report = (LEXICON_RU['battle_report_title'] + '\n\n' + 
+        attacker_report = (LEXICON_RU['battle_report_title'] + '\n' + 
             LEXICON_RU['battle_report_header'].format(operation_type="Нападение", target_name=defender_data['name'], datetime=now_str, luck_modifier=luck_modifier, result="ПОБЕДА" if is_attacker_win else "ПОРАЖЕНИЕ") +
             LEXICON_RU['battle_report_loot'].format(looted_resources=int(looted_resources)) +
             LEXICON_RU['battle_report_attacker_stats'].format(attacker_name=attacker_data['name'], losses=attacker_losses, initial=a_initial_army, loss_percent=round(attacker_losses / a_initial_army * 100 if a_initial_army > 0 else 0)) +
             LEXICON_RU['battle_report_defender_stats'].format(defender_name=defender_data['name'], losses=defender_losses, initial=d_initial_army, loss_percent=round(defender_losses / d_initial_army * 100 if d_initial_army > 0 else 0)))
-        
-        defender_report = (LEXICON_RU['battle_report_title'] + '\n\n' + 
-            LEXICON_RU['battle_report_header'].format(operation_type="Оборона", target_name=attacker_data['name'], datetime=now_str, luck_modifier=luck_modifier, result="ОБОРОНА УСПЕШНА" if not is_attacker_win else "ОБОРОНА ПРОВАЛЕНА") +
-            LEXICON_RU['battle_report_loot_lost'].format(looted_resources=int(looted_resources)) +
-            LEXICON_RU['battle_report_defender_stats'].format(defender_name=defender_data['name'], losses=defender_losses, initial=d_initial_army, loss_percent=round(defender_losses / d_initial_army * 100 if d_initial_army > 0 else 0)) +
-            LEXICON_RU['battle_report_attacker_stats'].format(attacker_name=attacker_data['name'], losses=attacker_losses, initial=a_initial_army, loss_percent=round(attacker_losses / a_initial_army * 100 if a_initial_army > 0 else 0)))
+
+        if defender_data['type'] == 'player':
+            defender_report = (LEXICON_RU['battle_report_title'] + '\n' + 
+                LEXICON_RU['battle_report_header'].format(operation_type="Оборона", target_name=attacker_data['name'], datetime=now_str, luck_modifier=luck_modifier, result="ОБОРОНА ПРОВАЛЕНА" if is_attacker_win else "ОБОРОНА УСПЕШНА") +
+                LEXICON_RU['battle_report_loot_lost'].format(looted_resources=int(looted_resources)) +
+                LEXICON_RU['battle_report_defender_stats'].format(defender_name=defender_data['name'], losses=defender_losses, initial=d_initial_army, loss_percent=round(defender_losses / d_initial_army * 100 if d_initial_army > 0 else 0)) +
+                LEXICON_RU['battle_report_attacker_stats'].format(attacker_name=attacker_data['name'], losses=attacker_losses, initial=a_initial_army, loss_percent=round(attacker_losses / a_initial_army * 100 if a_initial_army > 0 else 0)))
+            
+            report_id = add_battle_report(target_id, defender_report)
+            try:
+                await bot.send_message(target_id, LEXICON_RU['attack_notification'], reply_markup=InlineKeyboardBuilder().button(text="👁️ Посмотреть отчет", callback_data=f"view_report_{report_id}").as_markup())
+            except TelegramAPIError as e:
+                logging.error(f"Не удалось отправить уведомление защитнику {target_id}: {e}")
 
         await callback.message.edit_text(attacker_report, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardBuilder().button(text="↩️ В штаб", callback_data="main_menu").as_markup())
-        report_id = add_battle_report(defender_id, defender_report)
         set_attack_cooldown(attacker_id, int(time.time() + ATTACK_COOLDOWN_SECONDS))
-        try:
-            await bot.send_message(defender_id, LEXICON_RU['attack_notification'], reply_markup=InlineKeyboardBuilder().button(text="👁️ Посмотреть отчет", callback_data=f"view_report_{report_id}").as_markup())
-        except TelegramAPIError as e:
-            logging.error(f"Не удалось отправить уведомление защитнику {defender_id}: {e}")
-            
+
     except Exception as e:
         logging.error(f"КРИТИЧЕСКАЯ ОШИБКА В БОЮ: {e}", exc_info=True)
         await callback.message.edit_text(LEXICON_RU['critical_battle_error'], reply_markup=InlineKeyboardBuilder().button(text="↩️ В штаб", callback_data="main_menu").as_markup())
@@ -1276,6 +1404,7 @@ async def main():
     await set_main_menu(bot)
     
     scheduler.add_job(check_bonus_notifications, 'interval', minutes=15)
+    scheduler.add_job(manage_npc_spawns, 'interval', hours=1)
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
