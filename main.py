@@ -54,13 +54,14 @@ BUILDINGS = {
 }
 LUCK_MODIFIER_RANGE = 0.25
 ATTACK_COOLDOWN_SECONDS = 600
-BONUS_COOLDOWN_SECONDS = 2 * 3600
+BONUS_COOLDOWN_SECONDS = 2 * 3600  # 2 часа
 
 BARRACKS_TRAINING_TIME = {1: 90, 2: 82, 3: 75, 4: 68, 5: 62, 6: 56, 7: 50, 8: 45, 9: 40, 10: 35}
 WAREHOUSE_PROTECTION_PERCENT = 0.40
 BUILDING_UPGRADE_TIME = {1: 300, 2: 600, 3: 1200, 4: 2700, 5: 5400, 6: 10800, 7: 21600, 8: 43200, 9: 86400, 10: 172800}
 MAX_BUILDING_LEVEL = 10
 
+# Сбалансированные цены и вместимость
 BUILDING_UPGRADE_COST = {
     1: 800, 2: 1800, 3: 3500, 4: 6500, 5: 11000,
     6: 18000, 7: 28000, 8: 45000, 9: 70000, 10: 0
@@ -605,7 +606,8 @@ async def text_cmd_bonus(message: types.Message):
 
 @dp.callback_query(F.data == "show_bonus_menu")
 async def cq_show_bonus_menu(callback: types.CallbackQuery):
-    await callback.message.delete()
+    if callback.message:
+        await callback.message.delete()
     await process_bonus_claim(callback)
 
 
@@ -1233,14 +1235,15 @@ async def cq_attack_player(callback: types.CallbackQuery, state: FSMContext):
         
         now_str = datetime.datetime.now().strftime('%d.%m.%Y %H:%M')
         
-        attacker_report = (LEXICON_RU['battle_report_title'] + '\n' + 
-            LEXICON_RU['battle_report_header'].format(operation_type="Нападение", target_name=defender_data['name'], datetime=now_str, luck_modifier=luck_modifier, result="ПОБЕДА") +
+        attacker_report = (LEXICON_RU['battle_report_title'] + '\n\n' + 
+            LEXICON_RU['battle_report_header'].format(operation_type="Нападение", target_name=defender_data['name'], datetime=now_str, luck_modifier=luck_modifier, result="ПОБЕДА" if is_attacker_win else "ПОРАЖЕНИЕ") +
             LEXICON_RU['battle_report_loot'].format(looted_resources=int(looted_resources)) +
             LEXICON_RU['battle_report_attacker_stats'].format(attacker_name=attacker_data['name'], losses=attacker_losses, initial=a_initial_army, loss_percent=round(attacker_losses / a_initial_army * 100 if a_initial_army > 0 else 0)) +
             LEXICON_RU['battle_report_defender_stats'].format(defender_name=defender_data['name'], losses=defender_losses, initial=d_initial_army, loss_percent=round(defender_losses / d_initial_army * 100 if d_initial_army > 0 else 0)))
         
-        defender_report = (LEXICON_RU['battle_report_title'] + '\n' + 
-            LEXICON_RU['battle_report_header'].format(operation_type="Оборона", target_name=attacker_data['name'], datetime=now_str, luck_modifier=luck_modifier, result="ПОРАЖЕНИЕ") +
+        defender_report = (LEXICON_RU['battle_report_title'] + '\n\n' + 
+            LEXICON_RU['battle_report_header'].format(operation_type="Оборона", target_name=attacker_data['name'], datetime=now_str, luck_modifier=luck_modifier, result="ОБОРОНА УСПЕШНА" if not is_attacker_win else "ОБОРОНА ПРОВАЛЕНА") +
+            LEXICON_RU['battle_report_loot_lost'].format(looted_resources=int(looted_resources)) +
             LEXICON_RU['battle_report_defender_stats'].format(defender_name=defender_data['name'], losses=defender_losses, initial=d_initial_army, loss_percent=round(defender_losses / d_initial_army * 100 if d_initial_army > 0 else 0)) +
             LEXICON_RU['battle_report_attacker_stats'].format(attacker_name=attacker_data['name'], losses=attacker_losses, initial=a_initial_army, loss_percent=round(attacker_losses / a_initial_army * 100 if a_initial_army > 0 else 0)))
 
@@ -1272,7 +1275,6 @@ async def main():
     init_db()
     await set_main_menu(bot)
     
-    # Запускаем планировщик для уведомлений о бонусах
     scheduler.add_job(check_bonus_notifications, 'interval', minutes=15)
     scheduler.start()
 
