@@ -61,7 +61,6 @@ WAREHOUSE_PROTECTION_PERCENT = 0.40
 BUILDING_UPGRADE_TIME = {1: 300, 2: 600, 3: 1200, 4: 2700, 5: 5400, 6: 10800, 7: 21600, 8: 43200, 9: 86400, 10: 172800}
 MAX_BUILDING_LEVEL = 10
 
-# --- НОВЫЕ СБАЛАНСИРОВАННЫЕ ЦЕНЫ И ВМЕСТИМОСТЬ ---
 BUILDING_UPGRADE_COST = {
     1: 800, 2: 1800, 3: 3500, 4: 6500, 5: 11000,
     6: 18000, 7: 28000, 8: 45000, 9: 70000, 10: 0
@@ -119,6 +118,7 @@ def init_db():
         except sqlite3.OperationalError: pass
         conn.commit()
 
+
 def get_bonus_cooldown(user_id: int) -> int | None:
     with sqlite3.connect(DATABASE_NAME) as conn:
         cursor = conn.cursor()
@@ -133,7 +133,8 @@ def get_bonus_cooldown(user_id: int) -> int | None:
 def set_bonus_claimed(user_id: int):
     with sqlite3.connect(DATABASE_NAME) as conn:
         cursor = conn.cursor()
-        cursor.execute("REPLACE INTO daily_bonuses (user_id, last_claim_timestamp, notification_sent) VALUES (?, ?, 1)", (user_id, int(time.time())))
+        # ИСПРАВЛЕНИЕ: ставим notification_sent в 0, чтобы планировщик знал, что нужно будет отправить уведомление
+        cursor.execute("REPLACE INTO daily_bonuses (user_id, last_claim_timestamp, notification_sent) VALUES (?, ?, 0)", (user_id, int(time.time())))
         conn.commit()
 
 def get_players_for_bonus_notification() -> list[tuple[int, int]]:
@@ -427,7 +428,10 @@ async def check_bonus_notifications():
                 set_bonus_notification_sent(user_id)
                 logging.info(f"Sent bonus notification to user {user_id}")
             except TelegramAPIError as e:
-                logging.error(f"Failed to send bonus notification to {user_id}: {e}")
+                if 'bot was blocked by the user' in e.message:
+                    logging.warning(f"User {user_id} has blocked the bot. Cannot send notification.")
+                else:
+                    logging.error(f"Failed to send bonus notification to {user_id}: {e}")
             await asyncio.sleep(0.1)
 
 # ==============================================================================
@@ -564,12 +568,15 @@ async def process_bonus_claim(source: Union[types.Message, types.CallbackQuery])
             await msg_for_anim.edit_text(LEXICON_RU['bonus_opening'].format(spinner=spinners[i % len(spinners)]))
         
         player_data = get_player(user.id)
+        if not player_data: # Проверка на случай, если игрок удалил данные
+            return
+            
         prize_text = ""
         if chosen_prize['type'] == 'resources':
             player_data['resources'] += chosen_prize['amount']
             prize_text = f"**{chosen_prize['amount']}** 💰"
         elif chosen_prize['type'] == 'soldiers':
-            player_data['army']['reserve']['soldier'] += chosen_prize['amount']
+            player_data['army']['reserve']['soldier'] = player_data['army']['reserve'].get('soldier', 0) + chosen_prize['amount']
             prize_text = f"**{chosen_prize['amount']}** 💂"
         
         update_player_data(user.id, player_data)
@@ -577,8 +584,8 @@ async def process_bonus_claim(source: Union[types.Message, types.CallbackQuery])
 
         await msg_for_anim.edit_text(LEXICON_RU['bonus_success'].format(prize_text=prize_text), parse_mode=ParseMode.MARKDOWN)
 
-    except TelegramAPIError:
-        logging.warning(f"Could not send bonus result to user {user.id}, likely blocked.")
+    except TelegramAPIError as e:
+        logging.warning(f"Could not send bonus result to user {user.id}, likely blocked: {e}")
 
 @dp.message(Command("bonus"))
 async def cmd_bonus(message: types.Message):
@@ -588,11 +595,10 @@ async def cmd_bonus(message: types.Message):
 async def text_cmd_bonus(message: types.Message):
     await process_bonus_claim(message)
 
-# Этот обработчик для кнопки, если решим ее добавить
-@dp.callback_query(F.data == "claim_daily_bonus")
-async def cq_claim_daily_bonus(callback: types.CallbackQuery):
-    await callback.message.delete()
+@dp.callback_query(F.data == "show_bonus_menu")
+async def cq_show_bonus_menu(callback: types.CallbackQuery):
     await process_bonus_claim(callback)
+
 
 # ==============================================================================
 # --- АДМИН-ПАНЕЛЬ ---
@@ -945,7 +951,7 @@ async def cq_view_specific_building(callback: types.CallbackQuery, state: FSMCon
     else:
         if level < MAX_BUILDING_LEVEL:
             upgrade_cost = BUILDING_UPGRADE_COST.get(level + 1)
-            upgrade_time_sec = BUILDING_UPGRADE_TIME.get(level + 1)
+            upgrade_time_sec = BUILDING_UPGRADE_TIME.get(level + 1, 0)
             upgrade_time_str = str(datetime.timedelta(seconds=upgrade_time_sec))
             text += LEXICON_RU['upgrade_info'].format(
                 next_level=level + 1,
@@ -984,7 +990,7 @@ async def cq_upgrade_building(callback: types.CallbackQuery):
     if cost and player_data['resources'] >= cost:
         player_data['resources'] -= cost
         update_player_data(user_id, player_data)
-        build_time_seconds = BUILDING_UPGRADE_TIME[level + 1]
+        build_time_seconds = BUILDING_UPGRADE_TIME.get(level + 1, 0)
         finish_time = int(time.time() + build_time_seconds)
         add_to_construction_queue(user_id, bld_id, finish_time)
         await callback.answer(LEXICON_RU['upgrade_started'].format(building_name=BUILDINGS[bld_id]['name']))
