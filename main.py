@@ -61,6 +61,7 @@ WAREHOUSE_PROTECTION_PERCENT = 0.40
 BUILDING_UPGRADE_TIME = {1: 300, 2: 600, 3: 1200, 4: 2700, 5: 5400, 6: 10800, 7: 21600, 8: 43200, 9: 86400, 10: 172800}
 MAX_BUILDING_LEVEL = 10
 
+# Новые сбалансированные цены
 BUILDING_UPGRADE_COST = {
     1: 800, 2: 1800, 3: 3500, 4: 6500, 5: 11000,
     6: 18000, 7: 28000, 8: 45000, 9: 70000, 10: 0
@@ -69,7 +70,6 @@ WAREHOUSE_CAPACITY = {
     1: 2000, 2: 4000, 3: 7000, 4: 12000, 5: 20000,
     6: 30000, 7: 50000, 8: 80000, 9: 120000, 10: 200000
 }
-
 
 # ==============================================================================
 # --- УПРАВЛЕНИЕ БАЗОЙ ДАННЫХ ---
@@ -117,7 +117,6 @@ def init_db():
             cursor.execute("ALTER TABLE daily_bonuses ADD COLUMN notification_sent INTEGER DEFAULT 0")
         except sqlite3.OperationalError: pass
         conn.commit()
-
 
 def get_bonus_cooldown(user_id: int) -> int | None:
     with sqlite3.connect(DATABASE_NAME) as conn:
@@ -383,7 +382,7 @@ async def check_and_complete_training(user_id: int):
             conn.commit()
     if units_completed > 0 and quantity_remaining == 0:
         try:
-            await bot.send_message(user_id, "✅ **Подготовка завершена!** Новые отряды прибыли в гарнизон.")
+            await bot.send_message(user_id, "✅ **Подготовка завершена!** Новые отряды прибыли в резерв.")
         except TelegramAPIError as e:
             logging.error(f"Не удалось уведомить о финальном завершении тренировки {user_id}: {e}")
     return units_completed > 0
@@ -626,7 +625,6 @@ async def cq_admin_main_menu(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(LEXICON_RU['admin_panel_title'], reply_markup=get_admin_main_keyboard())
     await callback.answer()
 
-# --- Управление ресурсами ---
 @dp.callback_query(F.data == "admin_resources")
 async def cq_admin_resources(callback: types.CallbackQuery):
     await callback.message.edit_text(LEXICON_RU['admin_give_resources_title'], reply_markup=get_admin_resources_keyboard())
@@ -674,7 +672,6 @@ async def process_admin_amount(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# --- Рассылка ---
 @dp.callback_query(F.data == "admin_broadcast")
 async def cq_admin_broadcast(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.waiting_for_broadcast_message)
@@ -700,7 +697,6 @@ async def process_broadcast_message(message: types.Message, state: FSMContext):
     ), reply_markup=InlineKeyboardBuilder().button(text="↩️ В админ-панель", callback_data="admin_main").as_markup())
 
 
-# --- УПРАВЛЕНИЕ ИГРОКАМИ ---
 @dp.callback_query(F.data == "admin_player_management")
 async def cq_admin_player_management(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
@@ -866,7 +862,7 @@ async def show_army_management_menu(user_id: int, state: FSMContext, message_to_
         reserve_army=player_data['army']['reserve'].get('soldier', 0)
     )
     builder = InlineKeyboardBuilder()
-    builder.button(text="➡️ В гарнизон", callback_data="move_to_reserve")
+    builder.button(text="➡️ В резерв", callback_data="move_to_reserve")
     builder.button(text="⬅️ В штурмовой отряд", callback_data="move_to_active")
     builder.button(text="↩️ Назад", callback_data="show_base")
     builder.adjust(2, 1)
@@ -1274,6 +1270,7 @@ async def main():
     init_db()
     await set_main_menu(bot)
     
+    # Запускаем планировщик для уведомлений о бонусах
     scheduler.add_job(check_bonus_notifications, 'interval', minutes=15)
     scheduler.start()
 
