@@ -70,6 +70,7 @@ WAREHOUSE_CAPACITY = {
     6: 30000, 7: 50000, 8: 80000, 9: 120000, 10: 200000
 }
 
+
 # ==============================================================================
 # --- УПРАВЛЕНИЕ БАЗОЙ ДАННЫХ ---
 # ==============================================================================
@@ -518,7 +519,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
-    await message.answer(LEXICON_RU['help_command_text'], parse_mode=ParseMode.MARKDOWN_V2)
+    await message.answer(LEXICON_RU['help_command_text'], parse_mode=ParseMode.HTML)
 
 @dp.message(Command("id"))
 async def cmd_id(message: types.Message):
@@ -604,8 +605,7 @@ async def text_cmd_bonus(message: types.Message):
 
 @dp.callback_query(F.data == "show_bonus_menu")
 async def cq_show_bonus_menu(callback: types.CallbackQuery):
-    if callback.message:
-        await callback.message.delete()
+    await callback.message.delete()
     await process_bonus_claim(callback)
 
 
