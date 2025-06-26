@@ -61,7 +61,6 @@ WAREHOUSE_PROTECTION_PERCENT = 0.40
 BUILDING_UPGRADE_TIME = {1: 300, 2: 600, 3: 1200, 4: 2700, 5: 5400, 6: 10800, 7: 21600, 8: 43200, 9: 86400, 10: 172800}
 MAX_BUILDING_LEVEL = 10
 
-# Новые сбалансированные цены
 BUILDING_UPGRADE_COST = {
     1: 800, 2: 1800, 3: 3500, 4: 6500, 5: 11000,
     6: 18000, 7: 28000, 8: 45000, 9: 70000, 10: 0
@@ -70,6 +69,7 @@ WAREHOUSE_CAPACITY = {
     1: 2000, 2: 4000, 3: 7000, 4: 12000, 5: 20000,
     6: 30000, 7: 50000, 8: 80000, 9: 120000, 10: 200000
 }
+
 
 # ==============================================================================
 # --- УПРАВЛЕНИЕ БАЗОЙ ДАННЫХ ---
@@ -589,7 +589,8 @@ async def process_bonus_claim(source: Union[types.Message, types.CallbackQuery])
         update_player_data(user.id, player_data)
         set_bonus_claimed(user.id)
 
-        await msg_for_anim.edit_text(LEXICON_RU['bonus_success'].format(prize_text=prize_text), parse_mode=ParseMode.MARKDOWN)
+        await msg_for_anim.edit_text(LEXICON_RU['bonus_success'].format(prize_text=prize_text), parse_mode=ParseMode.MARKDOWN,
+                                      reply_markup=InlineKeyboardBuilder().button(text="↩️ Назад в штаб", callback_data="main_menu").as_markup())
 
     except TelegramAPIError as e:
         logging.warning(f"Could not send bonus result to user {user.id}, likely blocked: {e}")
@@ -775,7 +776,8 @@ async def process_player_id_for_info(message: types.Message, state: FSMContext):
     else:
         dossier_text += LEXICON_RU['dossier_no_processes']
         
-    await message.answer(dossier_text, parse_mode=ParseMode.MARKDOWN)
+    await message.answer(dossier_text, parse_mode=ParseMode.MARKDOWN,
+                         reply_markup=InlineKeyboardBuilder().button(text="↩️ В админ-панель", callback_data="admin_main").as_markup())
 
 
 # ==============================================================================
