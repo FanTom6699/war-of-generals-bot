@@ -70,7 +70,6 @@ WAREHOUSE_CAPACITY = {
     6: 30000, 7: 50000, 8: 80000, 9: 120000, 10: 200000
 }
 
-
 # ==============================================================================
 # --- УПРАВЛЕНИЕ БАЗОЙ ДАННЫХ ---
 # ==============================================================================
@@ -605,7 +604,8 @@ async def text_cmd_bonus(message: types.Message):
 
 @dp.callback_query(F.data == "show_bonus_menu")
 async def cq_show_bonus_menu(callback: types.CallbackQuery):
-    await callback.message.delete()
+    if callback.message:
+        await callback.message.delete()
     await process_bonus_claim(callback)
 
 
@@ -872,7 +872,7 @@ async def show_army_management_menu(user_id: int, state: FSMContext, message_to_
     if message_to_edit:
         try:
             await message_to_edit.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
-        except TelegramAPIError: # Если сообщение не изменилось
+        except TelegramAPIError:
              if message_to_answer:
                 await message_to_answer.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
     elif message_to_answer:
