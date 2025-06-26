@@ -1256,7 +1256,7 @@ async def cq_show_targets(callback: types.CallbackQuery):
     targets_on_page = all_targets[start_index:end_index]
     
     builder = InlineKeyboardBuilder()
-    text = LEXICON_RU['select_target'].format(current_page=page, total_pages=total_pages) + "\n\n"
+    text = LEXICON_RU['select_target'].format(current_page=page, total_pages=total_pages) + "\n"
 
     for target in targets_on_page:
         if target['type'] == 'player':
@@ -1266,7 +1266,8 @@ async def cq_show_targets(callback: types.CallbackQuery):
             button_text = LEXICON_RU['target_npc_entry'].format(name=target['name'], power=target['power'])
             callback_data = f"attack_npc_{target['id']}"
         builder.button(text=button_text, callback_data=callback_data)
-        builder.row()
+
+    builder.adjust(1) # Это гарантирует, что каждая кнопка будет на новой строке
 
     nav_row = []
     if page > 1:
@@ -1321,7 +1322,6 @@ async def cq_attack(callback: types.CallbackQuery, state: FSMContext):
              await callback.message.edit_text("Цель не найдена или уже уничтожена.", reply_markup=InlineKeyboardBuilder().button(text="↩️ Назад", callback_data="show_targets_page_1").as_markup())
              return
 
-        # Общая логика боя
         d_initial_army = defender_data['army'].get('soldier', 0)
         s_stats = UNITS['soldier']['stats']
         
@@ -1342,7 +1342,7 @@ async def cq_attack(callback: types.CallbackQuery, state: FSMContext):
             
             warehouse_level = defender_data.get('buildings', {}).get('warehouse', 1)
             capacity = WAREHOUSE_CAPACITY.get(warehouse_level, 0)
-            protected_resources = capacity * WAREHOUSE_PROTECTION_PERCENT
+            protected_resources = capacity * WAREHOUSE_PROTECTION_PERCENT if defender_data['type'] == 'player' else 0
             available_for_looting = max(0, defender_data['resources'] - protected_resources)
             cargo_capacity = a_survivors * s_stats['cargo_capacity']
             looted_resources = min(available_for_looting, cargo_capacity)
@@ -1361,14 +1361,14 @@ async def cq_attack(callback: types.CallbackQuery, state: FSMContext):
         
         now_str = datetime.datetime.now().strftime('%d.%m.%Y %H:%M')
         
-        attacker_report = (LEXICON_RU['battle_report_title'] + '\n' + 
+        attacker_report = (LEXICON_RU['battle_report_title'] + '\n\n' + 
             LEXICON_RU['battle_report_header'].format(operation_type="Нападение", target_name=defender_data['name'], datetime=now_str, luck_modifier=luck_modifier, result="ПОБЕДА" if is_attacker_win else "ПОРАЖЕНИЕ") +
             LEXICON_RU['battle_report_loot'].format(looted_resources=int(looted_resources)) +
             LEXICON_RU['battle_report_attacker_stats'].format(attacker_name=attacker_data['name'], losses=attacker_losses, initial=a_initial_army, loss_percent=round(attacker_losses / a_initial_army * 100 if a_initial_army > 0 else 0)) +
             LEXICON_RU['battle_report_defender_stats'].format(defender_name=defender_data['name'], losses=defender_losses, initial=d_initial_army, loss_percent=round(defender_losses / d_initial_army * 100 if d_initial_army > 0 else 0)))
-
+        
         if defender_data['type'] == 'player':
-            defender_report = (LEXICON_RU['battle_report_title'] + '\n' + 
+            defender_report = (LEXICON_RU['battle_report_title'] + '\n\n' + 
                 LEXICON_RU['battle_report_header'].format(operation_type="Оборона", target_name=attacker_data['name'], datetime=now_str, luck_modifier=luck_modifier, result="ОБОРОНА ПРОВАЛЕНА" if is_attacker_win else "ОБОРОНА УСПЕШНА") +
                 LEXICON_RU['battle_report_loot_lost'].format(looted_resources=int(looted_resources)) +
                 LEXICON_RU['battle_report_defender_stats'].format(defender_name=defender_data['name'], losses=defender_losses, initial=d_initial_army, loss_percent=round(defender_losses / d_initial_army * 100 if d_initial_army > 0 else 0)) +
